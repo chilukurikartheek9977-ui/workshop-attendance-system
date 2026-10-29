@@ -1,0 +1,93 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'admin' ||
+        request.auth.token.email == '23pa1a1238@vishnu.edu.in' ||
+        request.auth.token.email == '23pa1a1238@vishnu.edu.inc' ||
+        request.auth.token.email == 'doitclub@vishnu.edu.in' ||
+        request.auth.token.email == 'testadmin@example.com'
+      );
+    }
+    
+    function isStudent() {
+      return isAuthenticated() && request.auth.token.role == 'student';
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // USERS COLLECTION
+    match /users/{userId} {
+      // Users can read their own profile, Admins can read all.
+      allow read: if isOwner(userId) || isAdmin();
+      // Only Admins or Cloud Functions can modify user data/roles
+      allow write: if isAdmin(); 
+    }
+
+    // STUDENTS COLLECTION
+    match /students/{studentId} {
+      // A student can read their own student record, Admins can read all.
+      allow read: if (isStudent() && resource.data.userId == request.auth.uid) || isAdmin();
+      // Modifications only via Admin or Cloud Functions
+      allow write: if isAdmin();
+    }
+
+    // ADMINS COLLECTION
+    match /admins/{adminId} {
+      allow read: if isAdmin();
+      allow write: if false; // Only manageable via Cloud Functions/Console
+    }
+
+    // CLASSES & SUBJECTS
+    match /classes/{classId} {
+      // Anyone authenticated can read classes
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+    
+    match /subjects/{subjectId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // ATTENDANCE SESSIONS
+    match /attendanceSessions/{sessionId} {
+      // Students can read active sessions, Admins can read all
+      allow read: if isAuthenticated();
+      // Admins manage sessions
+      allow write: if isAdmin();
+    }
+
+    // ATTENDANCE RECORDS (CRITICAL SECURITY)
+    match /attendanceRecords/{recordId} {
+      // Students can only read their own records. Admins can read all.
+      allow read: if (isStudent() && resource.data.studentId == request.auth.uid) || isAdmin();
+      
+      // NO DIRECT WRITES ALLOWED FROM CLIENT! 
+      // Attendance must be marked via secure Cloud Function to validate the 10-second QR token.
+      allow write: if false;
+    }
+
+    // QR TOKENS
+    match /qrTokens/{tokenId} {
+      // Allow admins to manage QR tokens directly to bypass Cloud Functions
+      allow read, write: if isAdmin();
+    }
+    
+    // AUDIT LOGS
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false; // Only Cloud Functions create audit logs
+    }
+  }
+}
