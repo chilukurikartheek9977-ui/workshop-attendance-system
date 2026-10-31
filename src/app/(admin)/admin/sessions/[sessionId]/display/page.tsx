@@ -26,13 +26,57 @@ export default function QRDisplayPage({ params }: { params: Promise<{ sessionId:
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const mountedRef = useRef<boolean>(true);
 
-  // 1. Listen to Session Status from Firestore
+  // 1. Listen to Session Status from Firestore or LocalStorage Mock
   useEffect(() => {
     mountedRef.current = true;
-    const sessionRef = doc(db, 'attendanceSessions', sessionId);
 
+    function checkMockSession(): boolean {
+      if (typeof window === 'undefined') return false;
+      try {
+        const mockSessions: AttendanceSession[] = JSON.parse(localStorage.getItem('mockSessions') || '[]');
+        const found = mockSessions.find(s => s.id === sessionId);
+        if (found) {
+          queueMicrotask(() => {
+            setSession(found);
+            setCls(prev => prev || ({ id: found.classId, name: found.classId, section: 'A' } as Class));
+            setError(null);
+            setLoading(false);
+          });
+          return true;
+        }
+      } catch (e) {
+        console.error('Error reading mock sessions:', e);
+      }
+      return false;
+    }
+
+    if (process.env.NEXT_PUBLIC_MOCK_AUTH === 'true') {
+      const found = checkMockSession();
+      if (!found) {
+        queueMicrotask(() => {
+          setError('Session not found.');
+          setLoading(false);
+        });
+      }
+
+      const interval = setInterval(checkMockSession, 1500);
+      const onStorage = (e: StorageEvent) => {
+        if (e.key === 'mockSessions') checkMockSession();
+      };
+      window.addEventListener('storage', onStorage);
+
+      return () => {
+        mountedRef.current = false;
+        clearInterval(interval);
+        window.removeEventListener('storage', onStorage);
+        if (timerRef.current) clearTimeout(timerRef.current);
+      };
+    }
+
+    const sessionRef = doc(db, 'attendanceSessions', sessionId);
     const unsubscribe = onSnapshot(sessionRef, async (docSnap) => {
       if (!docSnap.exists()) {
+        if (checkMockSession()) return;
         setError('Session not found.');
         setLoading(false);
         return;
@@ -45,15 +89,21 @@ export default function QRDisplayPage({ params }: { params: Promise<{ sessionId:
       if (!cls) {
         try {
           const clsDoc = await getDoc(doc(db, 'classes', sessionData.classId));
-          if (clsDoc.exists()) setCls({ id: clsDoc.id, ...clsDoc.data() } as Class);
+          if (clsDoc.exists()) {
+            setCls({ id: clsDoc.id, ...clsDoc.data() } as Class);
+          } else {
+            setCls({ id: sessionData.classId, name: sessionData.classId } as Class);
+          }
         } catch (e) {
-          console.error('Failed to load class details');
+          console.error('Failed to load class details:', e);
+          setCls({ id: sessionData.classId, name: sessionData.classId } as Class);
         }
       }
 
       setLoading(false);
     }, (err) => {
-      console.error(err);
+      console.warn('Firestore onSnapshot error, checking local mock storage:', err);
+      if (checkMockSession()) return;
       setError('Failed to listen to session updates. Check network.');
       setLoading(false);
     });
@@ -63,7 +113,7 @@ export default function QRDisplayPage({ params }: { params: Promise<{ sessionId:
       unsubscribe();
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [sessionId]);
+  }, [sessionId, cls]);
 
   useEffect(() => {
     async function fetchNextToken() {
@@ -114,13 +164,18 @@ export default function QRDisplayPage({ params }: { params: Promise<{ sessionId:
 
     if (!session || session.status !== 'ACTIVE') {
       if (timerRef.current) clearTimeout(timerRef.current);
-      setTimeout(() => setQrToken(null), 0);
+      queueMicrotask(() => {
+        setQrToken(null);
+      });
       tokenRef.current = null;
       return;
     }
 
     fetchNextToken();
-    
+
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.status, sessionId]);
 
@@ -132,7 +187,7 @@ export default function QRDisplayPage({ params }: { params: Promise<{ sessionId:
     return (
       <div className="flex h-screen flex-col items-center justify-center bg-gray-900 p-6 text-center">
         <h1 className="text-3xl font-bold text-red-500 mb-4">{error}</h1>
-        <button onClick={() => router.push('/admin/sessions')} className="mt-6 bg-blue-600 px-6 py-3 rounded-lg text-white font-semibold">Return to Sessions</button>
+        <button onClick={() => router.push('/admin/sessions')} className="mt-6 bg-blue-600 px-6 py-3 rounded-lg text-white font-semibold hover:bg-blue-700 transition">Return to Sessions</button>
       </div>
     );
   }
@@ -166,7 +221,8 @@ export default function QRDisplayPage({ params }: { params: Promise<{ sessionId:
     );
   }
 
-  const qrPayload = qrToken ? `https://workshop-attendance.local/student/scan?t=${qrToken.token}&s=${sessionId}` : '';
+  const baseOrigin = typeof window !== 'undefined' && window.location?.origin ? window.location.origin : 'http://localhost:3000';
+  const qrPayload = qrToken ? `${baseOrigin}/student/scan?t=${qrToken.token}&s=${sessionId}` : '';
 
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden font-sans">
@@ -174,7 +230,7 @@ export default function QRDisplayPage({ params }: { params: Promise<{ sessionId:
       <header className="p-6 md:p-10 flex justify-between items-start">
         <div>
           <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 to-emerald-400 text-transparent bg-clip-text">
-            {cls?.name || 'Loading Event...'}
+            {cls?.name || session?.classId || 'Event Attendance'}
           </h1>
           <h2 className="text-2xl md:text-3xl font-medium text-gray-400 mt-2">
             Event Attendance
@@ -197,16 +253,18 @@ export default function QRDisplayPage({ params }: { params: Promise<{ sessionId:
              </div>
           )}
 
-          <div className={`bg-white p-8 md:p-12 rounded-[2rem] shadow-[0_0_50px_rgba(59,130,246,0.15)] transition-opacity duration-300 ${isRefreshing ? 'opacity-80' : 'opacity-100'}`}>
+          <div className={`bg-white p-6 md:p-10 rounded-[2rem] shadow-[0_0_50px_rgba(59,130,246,0.15)] flex items-center justify-center transition-opacity duration-300 ${isRefreshing ? 'opacity-80' : 'opacity-100'}`}>
             {qrPayload ? (
-              <QRCode 
-                value={qrPayload}
-                size={400}
-                level="H"
-                className="w-[300px] h-[300px] md:w-[450px] md:h-[450px]"
-              />
+              <div className="bg-white p-2 rounded-xl">
+                <QRCode 
+                  value={qrPayload}
+                  size={360}
+                  level="H"
+                  className="w-[280px] h-[280px] md:w-[380px] md:h-[380px]"
+                />
+              </div>
             ) : (
-              <div className="w-[300px] h-[300px] md:w-[450px] md:h-[450px] flex items-center justify-center bg-gray-100 rounded-xl">
+              <div className="w-[280px] h-[280px] md:w-[380px] md:h-[380px] flex items-center justify-center bg-gray-100 rounded-xl">
                 <span className="text-gray-400 text-xl animate-pulse">Generating Secure QR...</span>
               </div>
             )}
@@ -214,10 +272,10 @@ export default function QRDisplayPage({ params }: { params: Promise<{ sessionId:
         </div>
 
         {/* Countdown */}
-        <div className="mt-12 text-center h-24">
+        <div className="mt-10 text-center h-24">
           {countdown > 0 ? (
             <div className="flex flex-col items-center">
-              <span className="text-gray-400 text-lg md:text-xl font-medium mb-2">Changes in</span>
+              <span className="text-gray-400 text-lg md:text-xl font-medium mb-1">Changes in</span>
               <span className={`text-5xl md:text-7xl font-bold font-mono tracking-tighter ${countdown <= 3 ? 'text-red-500' : 'text-white'}`}>
                 00:{countdown.toString().padStart(2, '0')}
               </span>

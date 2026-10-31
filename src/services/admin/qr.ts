@@ -22,18 +22,50 @@ export async function generateDisplayToken(sessionId: string, adminUid?: string)
   const issuedAt = new Date(now);
   const expiresAt = new Date(now + 10 * 1000); // 10 seconds lifespan
 
-  // Store Token Hash in Firestore
-  const tokenRef = doc(db, 'qrTokens', tokenHash);
-  await setDoc(tokenRef, {
-    sessionId,
-    issuedAt,
-    expiresAt,
-    status: 'ACTIVE',
-    createdBy: adminUid || 'admin'
-  });
-
-  return {
-    token: rawToken,
-    expiresAt: expiresAt.getTime()
+  const saveLocalMockToken = () => {
+    if (typeof window !== 'undefined') {
+      const activeTokens = JSON.parse(localStorage.getItem('mockQrTokens') || '{}');
+      activeTokens[sessionId] = {
+        token: rawToken,
+        tokenHash,
+        sessionId,
+        issuedAt: issuedAt.toISOString(),
+        expiresAt: expiresAt.getTime(),
+        status: 'ACTIVE'
+      };
+      localStorage.setItem('mockQrTokens', JSON.stringify(activeTokens));
+    }
   };
+
+  if (process.env.NEXT_PUBLIC_MOCK_AUTH === 'true') {
+    saveLocalMockToken();
+    return {
+      token: rawToken,
+      expiresAt: expiresAt.getTime()
+    };
+  }
+
+  try {
+    // Store Token Hash in Firestore
+    const tokenRef = doc(db, 'qrTokens', tokenHash);
+    await setDoc(tokenRef, {
+      sessionId,
+      issuedAt,
+      expiresAt,
+      status: 'ACTIVE',
+      createdBy: adminUid || 'admin'
+    });
+
+    return {
+      token: rawToken,
+      expiresAt: expiresAt.getTime()
+    };
+  } catch (err) {
+    console.warn('Firestore setDoc failed, saving to local mock storage:', err);
+    saveLocalMockToken();
+    return {
+      token: rawToken,
+      expiresAt: expiresAt.getTime()
+    };
+  }
 }

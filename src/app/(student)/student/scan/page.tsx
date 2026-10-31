@@ -97,7 +97,7 @@ export default function StudentScanPage() {
     try {
       let url: URL;
       try {
-        url = new URL(decodedText);
+        url = new URL(decodedText, typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
       } catch (e) {
         throw new Error('Invalid QR Code format.');
       }

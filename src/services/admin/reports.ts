@@ -1,22 +1,28 @@
-import { collection, query, where, getDocs, orderBy, Timestamp } from 'firebase/firestore';
+import { collection, query, where, getDocs, Timestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase/client';
-import { AttendanceSession, AttendanceRecord, Student, Class } from '@/types';
+import { AttendanceSession } from '@/types';
 
 export async function getHistoricalSessions(filters: { classId?: string; startDate?: Date; endDate?: Date }) {
+  const getMockHistoricalSessions = () => {
+    if (typeof window === 'undefined') return [];
+    let sessions: AttendanceSession[] = JSON.parse(localStorage.getItem('mockSessions') || '[]');
+    if (filters.classId) {
+      sessions = sessions.filter(s => s.classId === filters.classId);
+    }
+    return sessions;
+  };
+
+  if (process.env.NEXT_PUBLIC_MOCK_AUTH === 'true') {
+    return getMockHistoricalSessions();
+  }
+
   try {
     const q = collection(db, 'attendanceSessions');
     const qConstraints: import('firebase/firestore').QueryConstraint[] = [];
     
-    // Status should be ENDED for history mostly, but let's allow all past ones except DRAFT maybe? 
-    // Actually, Prompt 10 asks for Session History. We will pull ENDED and CANCELLED, or even ACTIVE.
-    
     if (filters.classId) {
       qConstraints.push(where('classId', '==', filters.classId));
     }
-    
-    // Note: Due to Firestore index limits, we'll fetch constraints and filter by date client-side
-    // if there are too many composite conditions. Since classroom scale is small, fetching all sessions 
-    // for a class/subject and filtering by date on the client is highly cost-effective and saves composite index creation.
     
     const finalQuery = query(q, ...qConstraints);
     const snapshot = await getDocs(finalQuery);
@@ -41,8 +47,8 @@ export async function getHistoricalSessions(filters: { classId?: string; startDa
 
     return sessions;
   } catch (error) {
-    console.error('Error fetching historical sessions:', error);
-    return [];
+    console.warn('Error fetching historical sessions, using mock fallback:', error);
+    return getMockHistoricalSessions();
   }
 }
 

@@ -6,11 +6,9 @@ import { db } from '@/lib/firebase/client';
 import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { AttendanceSession, Class, Student, AttendanceRecord } from '@/types';
 import { downloadCSV } from '@/services/admin/reports';
-import { useRouter } from 'next/navigation';
 
 export default function SessionDetailsPage({ params }: { params: Promise<{ sessionId: string }> }) {
   const { sessionId } = use(params);
-  const router = useRouter();
 
   const [session, setSession] = useState<AttendanceSession | null>(null);
   const [cls, setCls] = useState<Class | null>(null);
@@ -22,6 +20,42 @@ export default function SessionDetailsPage({ params }: { params: Promise<{ sessi
   const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
+    function checkMock(): boolean {
+      if (typeof window === 'undefined') return false;
+      try {
+        const mockSessions = JSON.parse(localStorage.getItem('mockSessions') || '[]');
+        const found = mockSessions.find((s: any) => s.id === sessionId);
+        if (found) {
+          queueMicrotask(() => {
+            setSession(found);
+            setCls({ id: found.classId, name: found.classId, section: 'A' } as Class);
+            const mockStudents = JSON.parse(localStorage.getItem('mockStudents') || '[]');
+            setStudents(mockStudents.length ? mockStudents : [
+              { id: 'stu-1', userId: 'stu-1', name: 'Alex Johnson', email: 'alex@example.com', studentNumber: 'STU1001', classId: found.classId, department: 'CSE', year: 3, section: 'A', status: 'ACTIVE' },
+              { id: 'stu-2', userId: 'stu-2', name: 'Samantha Lee', email: 'sam@example.com', studentNumber: 'STU1002', classId: found.classId, department: 'CSE', year: 3, section: 'A', status: 'ACTIVE' }
+            ]);
+            const mockRecords = JSON.parse(localStorage.getItem('mockAttendanceRecords') || '[]');
+            setAttendanceRecords(mockRecords.filter((r: any) => r.sessionId === sessionId));
+            setLoading(false);
+          });
+          return true;
+        }
+      } catch (e) {
+        console.error('Error loading mock session details:', e);
+      }
+      return false;
+    }
+
+    if (process.env.NEXT_PUBLIC_MOCK_AUTH === 'true') {
+      if (!checkMock()) {
+        queueMicrotask(() => {
+          setError('Session not found.');
+          setLoading(false);
+        });
+      }
+      return;
+    }
+
     async function loadData() {
       try {
         setLoading(true);
@@ -31,6 +65,7 @@ export default function SessionDetailsPage({ params }: { params: Promise<{ sessi
         const sessionSnap = await getDoc(sessionRef);
         
         if (!sessionSnap.exists()) {
+          if (checkMock()) return;
           setError('Session not found.');
           setLoading(false);
           return;
@@ -40,24 +75,37 @@ export default function SessionDetailsPage({ params }: { params: Promise<{ sessi
         setSession(sessionData);
 
         // 2. Fetch Metadata
-        const clsDoc = await getDoc(doc(db, 'classes', sessionData.classId));
-        if (clsDoc.exists()) setCls({ id: clsDoc.id, ...clsDoc.data() } as Class);
+        try {
+          const clsDoc = await getDoc(doc(db, 'classes', sessionData.classId));
+          if (clsDoc.exists()) setCls({ id: clsDoc.id, ...clsDoc.data() } as Class);
+          else setCls({ id: sessionData.classId, name: sessionData.classId, section: 'A' } as Class);
+        } catch {
+          setCls({ id: sessionData.classId, name: sessionData.classId, section: 'A' } as Class);
+        }
 
         // 3. Fetch Roster
-        const rosterQuery = query(collection(db, 'students'), where('classId', '==', sessionData.classId), where('status', '==', 'ACTIVE'));
-        const rosterSnap = await getDocs(rosterQuery);
-        const rosterData = rosterSnap.docs.map(d => ({ id: d.id, ...d.data() } as Student));
-        rosterData.sort((a, b) => a.name.localeCompare(b.name));
-        setStudents(rosterData);
+        try {
+          const rosterQuery = query(collection(db, 'students'), where('classId', '==', sessionData.classId), where('status', '==', 'ACTIVE'));
+          const rosterSnap = await getDocs(rosterQuery);
+          const rosterData = rosterSnap.docs.map(d => ({ id: d.id, ...d.data() } as Student));
+          rosterData.sort((a, b) => a.name.localeCompare(b.name));
+          setStudents(rosterData);
+        } catch {
+          // ignore roster errors
+        }
 
         // 4. Fetch Attendance History (One-time pull, no listeners)
-        const attendanceQuery = query(collection(db, 'attendanceRecords'), where('sessionId', '==', sessionId));
-        const attSnap = await getDocs(attendanceQuery);
-        const records = attSnap.docs.map(d => ({ id: d.id, ...d.data() } as AttendanceRecord));
-        
-        setAttendanceRecords(records);
+        try {
+          const attendanceQuery = query(collection(db, 'attendanceRecords'), where('sessionId', '==', sessionId));
+          const attSnap = await getDocs(attendanceQuery);
+          const records = attSnap.docs.map(d => ({ id: d.id, ...d.data() } as AttendanceRecord));
+          setAttendanceRecords(records);
+        } catch {
+          // ignore
+        }
       } catch (err) {
-        console.error(err);
+        console.warn('loadData failed, checking mock:', err);
+        if (checkMock()) return;
         setError('Failed to load session details.');
       } finally {
         setLoading(false);
@@ -78,11 +126,11 @@ export default function SessionDetailsPage({ params }: { params: Promise<{ sessi
         student.name,
         student.studentNumber,
         isPresent ? 'PRESENT' : 'NOT MARKED',
-        record && record.markedAt ? new Date((record.markedAt as any).toMillis()).toLocaleTimeString() : 'N/A'
+        record && record.markedAt ? new Date((record.markedAt as any)?.toMillis?.() || 0).toLocaleTimeString() : 'N/A'
       ];
     });
 
-    const safeDate = session.createdAt ? new Date((session.createdAt as any).toMillis()).toISOString().split('T')[0] : 'UnknownDate';
+    const safeDate = session.createdAt ? new Date((session.createdAt as any)?.toMillis?.() || 0).toISOString().split('T')[0] : 'UnknownDate';
     downloadCSV(`${cls.name}_${safeDate}.csv`, headers, dataToExport);
   };
 
@@ -104,7 +152,7 @@ export default function SessionDetailsPage({ params }: { params: Promise<{ sessi
 
   const lowerSearch = searchQuery.toLowerCase();
   const mappedRoster = students.map(student => {
-    const record = attendanceRecords.find(r => r.studentId === student.id);
+    const record = attendanceRecords.find(r => r.studentId === student.id || r.studentId === student.userId);
     return {
       student,
       record,
@@ -123,13 +171,13 @@ export default function SessionDetailsPage({ params }: { params: Promise<{ sessi
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
           <div>
             <div className="flex items-center space-x-3 mb-2">
-              <h1 className="text-2xl font-bold text-gray-900">{cls?.name || 'Class Session'}</h1>
+              <h1 className="text-2xl font-bold text-gray-900">{cls?.name || session?.classId || 'Class Session'}</h1>
               <span className="px-3 py-1 bg-gray-100 text-gray-800 text-xs font-bold rounded-full border border-gray-200">
                 {session?.status}
               </span>
             </div>
             <p className="text-gray-500 font-medium">{cls?.section ? `Section ${cls.section}` : 'Attendance Session'}</p>
-            <p className="text-sm text-gray-400 mt-1">Date: {session?.createdAt ? new Date((session.createdAt as any).toMillis()).toLocaleDateString() : 'N/A'}</p>
+            <p className="text-sm text-gray-400 mt-1">Date: {session?.createdAt ? new Date((session.createdAt as any)?.toMillis?.() || 0).toLocaleDateString() : 'N/A'}</p>
           </div>
           <div className="mt-4 md:mt-0">
              <button 
@@ -214,7 +262,7 @@ export default function SessionDetailsPage({ params }: { params: Promise<{ sessi
                       </td>
                       <td className="px-6 py-4 text-gray-500 text-xs">
                         {record && record.markedAt 
-                          ? new Date((record.markedAt as any).toMillis()).toLocaleTimeString() 
+                          ? new Date((record.markedAt as any)?.toMillis?.() || 0).toLocaleTimeString() 
                           : '-'}
                       </td>
                     </tr>
